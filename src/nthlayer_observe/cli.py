@@ -334,6 +334,54 @@ def _cmd_check_deploy(args: argparse.Namespace) -> int:
     return exit_codes.get(result.result.name, 0)
 
 
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """Show human-readable budget explanations from assessment store."""
+    import json
+
+    from nthlayer_common.explanation import format_explanation
+    from nthlayer_observe.explanation import ExplanationEngine
+    from nthlayer_observe.sqlite_store import SQLiteAssessmentStore
+    from nthlayer_observe.store import AssessmentFilter
+
+    with SQLiteAssessmentStore(args.store) as store:
+        engine = ExplanationEngine()
+
+        if args.service:
+            services = [args.service]
+        else:
+            all_assessments = store.query(
+                AssessmentFilter(assessment_type="slo_state", limit=0)
+            )
+            services = sorted({a.service for a in all_assessments})
+
+        if not services:
+            print("No SLO assessments found in store.", file=sys.stderr)
+            return 0
+
+        all_explanations = []
+        for service in services:
+            explanations = engine.explain_service(
+                service, store, slo_filter=args.slo
+            )
+            all_explanations.extend(explanations)
+
+        if not all_explanations:
+            print("No matching SLO assessments found.", file=sys.stderr)
+            return 0
+
+        fmt = args.output_format
+        if fmt == "json":
+            print(json.dumps(
+                [e.to_dict() for e in all_explanations], indent=2
+            ))
+        else:
+            for exp in all_explanations:
+                print(format_explanation(exp, fmt=fmt))
+                print()
+
+    return 0
+
+
 def _cmd_portfolio(args: argparse.Namespace) -> int:
     """Aggregate service health from assessment store."""
     import json
@@ -512,6 +560,21 @@ def main(argv: list[str] | None = None) -> int:
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
 
+    explain_parser = subparsers.add_parser(
+        "explain", help="Show human-readable budget explanations"
+    )
+    explain_parser.add_argument(
+        "--store", default="assessments.db",
+        help="Assessment store path (default: assessments.db)",
+    )
+    explain_parser.add_argument("--service", help="Filter by service name")
+    explain_parser.add_argument("--slo", help="Filter by SLO name")
+    explain_parser.add_argument(
+        "--format", dest="output_format", default="table",
+        choices=["table", "json", "markdown"],
+        help="Output format (default: table)",
+    )
+
     args = parser.parse_args(argv)
 
     dispatch = {
@@ -524,6 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         "portfolio": _cmd_portfolio,
         "scorecard": _cmd_scorecard,
         "check-deploy": _cmd_check_deploy,
+        "explain": _cmd_explain,
     }
 
     handler = dispatch.get(args.command)
