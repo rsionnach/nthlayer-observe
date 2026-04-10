@@ -33,8 +33,8 @@ service-discovery = ["kazoo>=2.9", "etcd3>=0.12"]
 nthlayer-observe = "nthlayer_observe.cli:main"
 
 [tool.uv.sources]
-nthlayer-common = { path = "../nthlayer-common" }
-nthlayer-learn = { path = "../nthlayer-learn/lib/python" }
+nthlayer-common = { path = "../nthlayer-common", editable = true }
+nthlayer-learn = { path = "../nthlayer-learn/lib/python", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
