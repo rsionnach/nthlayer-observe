@@ -20,6 +20,7 @@ Deterministic runtime infrastructure layer for the NthLayer ecosystem. Reads liv
   - `portfolio` — Aggregate service health from slo_state assessments; table or JSON output; exit 0 (no-data prints stderr, still exits 0); args: `--store` (default: assessments.db), `--format` (table|json, default: table)
   - `scorecard` — Score service reliability (0–100) sorted descending; table or JSON output; exit 0; args: `--store` (default: assessments.db), `--format` (table|json, default: table)
   - `check-deploy` — Evaluate deployment gate based on slo_state assessments; exit 0 (APPROVED), 1 (WARNING), 2 (BLOCKED)
+  - `explain` — Build human-readable budget explanations from stored assessments; exit 0; args: `--store` (default: assessments.db), `--service` (optional), `--slo` (optional filter), `--format` (table|json|markdown, default: table)
 - `ObserveConfig` dataclass: `prometheus_url="http://localhost:9090"`, `store_path="assessments.db"`
 <!-- END AUTO-MANAGED -->
 
@@ -34,7 +35,8 @@ src/nthlayer_observe/
     assessment.py       # Assessment dataclass, VALID_ASSESSMENT_TYPES, create/to_dict/from_dict
     store.py            # AssessmentStore ABC, AssessmentFilter, MemoryAssessmentStore
     sqlite_store.py     # SQLiteAssessmentStore — WAL mode, thread-local connections, shared-DB capable
-    cli.py              # main() — _cmd_collect(), _cmd_drift(), _cmd_verify(), _cmd_discover(), _cmd_dependencies(), _cmd_blast_radius(), _cmd_portfolio(), _cmd_scorecard(), _cmd_check_deploy() all implemented; @main_with_error_handling()
+    cli.py              # main() — _cmd_collect(), _cmd_drift(), _cmd_verify(), _cmd_discover(), _cmd_dependencies(), _cmd_blast_radius(), _cmd_portfolio(), _cmd_scorecard(), _cmd_check_deploy(), _cmd_explain() all implemented; @main_with_error_handling()
+    explanation.py      # ExplanationEngine — explain_service(service, store, slo_filter) → list[BudgetExplanation]; deterministic, no LLM; imports BudgetExplanation from nthlayer_common.explanation
     config.py           # ObserveConfig dataclass (prometheus_url, store_path)
     api/                # (stub) Runtime HTTP API server
     db/                 # (stub) Runtime database layer
@@ -97,6 +99,7 @@ tests/
     test_gate_correlator.py  # TestBurnRateScore (5), TestProximityScore (2), TestMagnitudeScore (4), TestDependencyScore (5), TestHistoryScore (4), TestCorrelate (5: high-confidence/low-confidence/result-fields/confidence-labels/threshold-constants)
     test_gate_evaluator.py   # TestCheckDeploy (11: approved/warning/blocked/no-assessments/multi-slo/custom-policy-warning/custom-policy-blocking/low-tier-advisory/exhaustion-freeze/exhaustion-require-approval/slo-without-percent_consumed-ignored), TestCheckDeployCLI (check-deploy --help)
     test_gate_policies.py    # TestConditions (10), TestPolicyContext (2), TestConditionEvaluator (19: empty/simple/equality/inequality/AND/OR/NOT/parentheses/bool-var/missing-var/numeric/function-business_hours/weekday/freeze_period/invalid-fails-safe/evaluate_all-most-restrictive/evaluate_all-no-match/float/double-quotes/complex)
+    test_explanation.py      # TestExplanationEngine (11: healthy/warning/critical/exhausted/slo_filter/no_assessments/multiple/actions/budget_math/causes_over_80pct/causes_sli_below_target/returns_BudgetExplanation_type)
 ```
 <!-- END AUTO-MANAGED -->
 
@@ -109,7 +112,12 @@ uv run pytest tests/ -v --tb=short -x
 
 # Lint
 uv run ruff check src/ tests/ --ignore E501
+
+# Security scan (non-blocking)
+uv pip install pip-audit && uv run pip-audit --progress-spinner off
 ```
+
+- **CI:** pushes/PRs to `main` or `develop`; 3 jobs: test (matrix Python 3.11 and 3.12), lint, security (pip-audit, non-blocking); `UV_NO_SOURCES=1` in CI resolves nthlayer-common and nthlayer-learn from PyPI (not local paths)
 <!-- END AUTO-MANAGED -->
 
 <!-- AUTO-MANAGED: conventions -->

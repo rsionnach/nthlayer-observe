@@ -307,8 +307,8 @@ wheels = [
 
 [[package]]
 name = "nthlayer-common"
-version = "0.1.2"
-source = { directory = "../nthlayer-common" }
+version = "0.1.4"
+source = { editable = "../nthlayer-common" }
 dependencies = [
     { name = "cachetools" },
     { name = "circuitbreaker" },
@@ -331,7 +331,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
-    { name = "structlog", specifier = ">=24.1.0,<25.0.0" },
+    { name = "structlog", specifier = ">=24.1.0" },
     { name = "tenacity", specifier = ">=8.2.3,<10.0.0" },
 ]
 provides-extras = ["dev"]
@@ -339,7 +339,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "nthlayer-learn"
 version = "0.2.0"
-source = { directory = "../nthlayer-learn/lib/python" }
+source = { editable = "../nthlayer-learn/lib/python" }
 dependencies = [
     { name = "pyyaml" },
 ]
@@ -392,8 +392,8 @@ requires-dist = [
     { name = "kazoo", marker = "extra == 'service-discovery'", specifier = ">=2.9" },
     { name = "kazoo", marker = "extra == 'zookeeper'", specifier = ">=2.9" },
     { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=28.0" },
-    { name = "nthlayer-common", directory = "../nthlayer-common" },
-    { name = "nthlayer-learn", marker = "extra == 'dev'", directory = "../nthlayer-learn/lib/python" },
+    { name = "nthlayer-common", editable = "../nthlayer-common" },
+    { name = "nthlayer-learn", marker = "extra == 'dev'", editable = "../nthlayer-learn/lib/python" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<1.0" },
