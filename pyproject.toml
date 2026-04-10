@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nthlayer-observe"
+version = "0.1.0"
+description = "Deterministic runtime infrastructure layer for the NthLayer ecosystem"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "nthlayer-common",
+    "structlog>=24.1.0,<25.0.0",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "ruff>=0.8",
+    "nthlayer-learn",
+]
+kubernetes = ["kubernetes>=28.0"]
+zookeeper = ["kazoo>=2.9"]
+etcd = ["etcd3>=0.12"]
+service-discovery = ["kazoo>=2.9", "etcd3>=0.12"]
+
+[project.scripts]
+nthlayer-observe = "nthlayer_observe.cli:main"
+
+[tool.uv.sources]
+nthlayer-common = { path = "../nthlayer-common" }
+nthlayer-learn = { path = "../nthlayer-learn/lib/python" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
