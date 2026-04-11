@@ -5,6 +5,7 @@ Deterministic. No LLM. Pure arithmetic on assessment data.
 from __future__ import annotations
 
 from nthlayer_common.explanation import BudgetExplanation
+from nthlayer_observe.assessment import Assessment
 from nthlayer_observe.store import AssessmentFilter, AssessmentStore
 
 _STATUS_SEVERITY = {
@@ -34,7 +35,7 @@ class ExplanationEngine:
 
         # Deduplicate: keep latest per SLO name (query returns desc by timestamp)
         seen: set[str] = set()
-        latest: list = []
+        latest: list[Assessment] = []
         for a in assessments:
             slo_name = a.data.get("name", "unknown")
             if slo_name not in seen:
@@ -46,7 +47,7 @@ class ExplanationEngine:
 
         return [self._explain_slo(service, a) for a in latest]
 
-    def _explain_slo(self, service: str, assessment) -> BudgetExplanation:
+    def _explain_slo(self, service: str, assessment: Assessment) -> BudgetExplanation:
         data = assessment.data
         slo_name = data.get("name", "unknown")
         status = data.get("status", "UNKNOWN")
