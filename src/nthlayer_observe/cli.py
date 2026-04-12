@@ -4,11 +4,65 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 from nthlayer_common.errors import main_with_error_handling
+
+_log = logging.getLogger(__name__)
+
+
+def _add_decision_store_args(parser: argparse.ArgumentParser) -> None:
+    """Add --decision-store and --legacy-store flags to a subcommand parser."""
+    parser.add_argument(
+        "--decision-store", default=None,
+        help="Path to decision record SQLite DB. When set, writes content-addressed records alongside legacy store.",
+    )
+    parser.add_argument(
+        "--legacy-store", default=True, action=argparse.BooleanOptionalAction,
+        help="Write to legacy assessment store (default: enabled). Use --no-legacy-store to disable.",
+    )
+
+
+def _write_decision_record(
+    args: argparse.Namespace,
+    legacy_assessment: object,
+    *,
+    incident_id: str | None = None,
+) -> None:
+    """Write a content-addressed decision record if --decision-store is configured.
+
+    The ``legacy_assessment`` parameter is an ``nthlayer_observe.assessment.Assessment``.
+    Typed as ``object`` to avoid importing it at module scope (deferred imports).
+    """
+    if not getattr(args, "decision_store", None):
+        return
+
+    try:
+        from nthlayer_common.records.models import ZERO_HASH
+        from nthlayer_common.records.sqlite_store import SQLiteDecisionRecordStore
+        from nthlayer_observe.decision_records import build_decision_record, build_stream
+
+        store = SQLiteDecisionRecordStore(args.decision_store)
+        stream = build_stream(legacy_assessment)
+
+        # Get previous hash for this stream's chain
+        chain = store.get_chain("assessment", stream)
+        previous_hash = chain[-1].hash if chain else ZERO_HASH
+
+        record = build_decision_record(
+            legacy_assessment,
+            previous_hash=previous_hash,
+            incident_id=incident_id,
+        )
+        store.put_assessment(record)
+    except ValueError as exc:
+        # Chain fork or constraint violation — log at error level so it's visible
+        _log.error("Decision record chain fork on %s: %s", getattr(legacy_assessment, "service", "?"), exc)
+    except Exception as exc:
+        _log.warning("Decision record write failed: %s", exc)
 
 
 def _cmd_collect(args: argparse.Namespace) -> int:
@@ -50,7 +104,9 @@ def _cmd_collect(args: argparse.Namespace) -> int:
             assessments = results_to_assessments(results, service)
 
             for assessment in assessments:
-                store.put(assessment)
+                if args.legacy_store:
+                    store.put(assessment)
+                _write_decision_record(args, assessment)
                 total_assessments += 1
                 status = assessment.data.get("status", "")
                 if status in ("EXHAUSTED", "CRITICAL"):
@@ -113,7 +169,9 @@ def _cmd_drift(args: argparse.Namespace) -> int:
     )
 
     with SQLiteAssessmentStore(args.store) as store:
-        store.put(assessment)
+        if args.legacy_store:
+            store.put(assessment)
+    _write_decision_record(args, assessment)
 
     print(json.dumps(result.to_dict(), indent=2))
     return result.exit_code
@@ -164,7 +222,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     "exit_code": result.exit_code,
                 },
             )
-            store.put(assessment)
+            if args.legacy_store:
+                store.put(assessment)
+            _write_decision_record(args, assessment)
 
             status = "OK" if result.all_verified else "MISSING"
             print(
@@ -250,7 +310,9 @@ def _cmd_dependencies(args: argparse.Namespace) -> int:
     )
 
     with SQLiteAssessmentStore(args.store) as store:
-        store.put(assessment)
+        if args.legacy_store:
+            store.put(assessment)
+    _write_decision_record(args, assessment)
 
     print(json.dumps(assessment.data, indent=2))
     return 0
@@ -315,7 +377,9 @@ def _cmd_check_deploy(args: argparse.Namespace) -> int:
                 "reasons": [result.message] + result.recommendations,
             },
         )
-        store.put(assessment)
+        if args.legacy_store:
+            store.put(assessment)
+    _write_decision_record(args, assessment)
 
     print(json.dumps({
         "service": result.service,
@@ -460,6 +524,54 @@ def _cmd_scorecard(args: argparse.Namespace) -> int:
 
 
 @main_with_error_handling()
+def _cmd_verify_records(args: argparse.Namespace) -> int:
+    """Verify decision record chain integrity or incident completeness."""
+    from nthlayer_common.records.sqlite_store import SQLiteDecisionRecordStore
+    from nthlayer_common.records.verification import verify_chain, verify_incident
+
+    store = SQLiteDecisionRecordStore(args.decision_store)
+
+    if args.incident:
+        result = verify_incident(store, args.incident)
+        status = "VERIFIED" if result.verified else "FAILED"
+        print(f"Incident: {args.incident}")
+        print(f"  Assessments: {result.assessment_count}")
+        print(f"  Verdicts:    {result.verdict_count}")
+        print(f"  Evaluations: {result.evaluation_count}")
+        print(f"  Status:      {status}")
+        if result.errors:
+            for err in result.errors:
+                print(f"  Error: {err}")
+        return 0 if result.verified else 1
+
+    if args.chain:
+        # Chain key depends on record type:
+        #   assessments → --stream, verdicts → --agent, evaluations → --incident-id
+        chain_key_map = {
+            "assessments": args.stream,
+            "verdicts": args.agent,
+            "evaluations": getattr(args, "incident_id", None),
+        }
+        chain_key = chain_key_map.get(args.chain)
+        if not chain_key:
+            key_flag = {"assessments": "--stream", "verdicts": "--agent", "evaluations": "--incident-id"}[args.chain]
+            print(f"Error: {key_flag} required with --chain {args.chain}", file=sys.stderr)
+            return 2
+        record_type = {"assessments": "assessment", "verdicts": "verdict", "evaluations": "evaluation"}[args.chain]
+        result = verify_chain(store, record_type, chain_key)
+        status = "VERIFIED" if result.verified else "FAILED"
+        print(f"Chain: {record_type}/{chain_key}")
+        print(f"  Records: {result.record_count}")
+        print(f"  Status:  {status}")
+        if result.errors:
+            for err in result.errors:
+                print(f"  Error: {err}")
+        return 0 if result.verified else 1
+
+    print("Error: --chain or --incident required", file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="nthlayer-observe",
@@ -480,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     collect_parser.add_argument(
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
+    _add_decision_store_args(collect_parser)
 
     drift_parser = subparsers.add_parser("drift", help="Detect SLO budget drift patterns")
     drift_parser.add_argument("--service", required=True, help="Service name")
@@ -493,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     drift_parser.add_argument(
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
+    _add_decision_store_args(drift_parser)
 
     verify_parser = subparsers.add_parser(
         "verify", help="Verify metric existence in Prometheus"
@@ -506,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument(
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
+    _add_decision_store_args(verify_parser)
 
     discover_parser = subparsers.add_parser("discover", help="Discover available metrics")
     discover_parser.add_argument("--prometheus-url", required=True, help="Prometheus server URL")
@@ -521,6 +636,7 @@ def main(argv: list[str] | None = None) -> int:
     deps_parser.add_argument(
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
+    _add_decision_store_args(deps_parser)
 
     blast_parser = subparsers.add_parser("blast-radius", help="Analyze deployment blast radius")
     blast_parser.add_argument("--service", required=True, help="Service name")
@@ -559,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     check_deploy_parser.add_argument(
         "--store", default="assessments.db", help="Assessment store path (default: assessments.db)"
     )
+    _add_decision_store_args(check_deploy_parser)
 
     explain_parser = subparsers.add_parser(
         "explain", help="Show human-readable budget explanations"
@@ -575,6 +692,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Output format (default: table)",
     )
 
+    # verify-records (decision record chain verification)
+    vr_parser = subparsers.add_parser(
+        "verify-records", help="Verify decision record chain integrity"
+    )
+    vr_parser.add_argument(
+        "--decision-store", required=True, help="Path to decision record SQLite DB"
+    )
+    vr_parser.add_argument(
+        "--chain", choices=["assessments", "verdicts", "evaluations"],
+        help="Verify a specific record chain"
+    )
+    vr_parser.add_argument("--stream", default=None, help="Stream identifier (for --chain assessments)")
+    vr_parser.add_argument("--agent", default=None, help="Agent name (for --chain verdicts)")
+    vr_parser.add_argument("--incident-id", default=None, help="Incident ID (for --chain evaluations)")
+    vr_parser.add_argument("--incident", default=None, help="Incident ID to verify")
+
     args = parser.parse_args(argv)
 
     dispatch = {
@@ -588,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
         "scorecard": _cmd_scorecard,
         "check-deploy": _cmd_check_deploy,
         "explain": _cmd_explain,
+        "verify-records": _cmd_verify_records,
     }
 
     handler = dispatch.get(args.command)
