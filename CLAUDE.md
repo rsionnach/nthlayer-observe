@@ -10,7 +10,7 @@ Deterministic runtime infrastructure layer for the NthLayer ecosystem. Reads liv
 - Runtime deps: `nthlayer-common` (local workspace), `structlog`, `pyyaml`, `scipy`, `numpy`
 - Optional dep groups: `kubernetes` (`kubernetes>=28.0`), `zookeeper` (`kazoo>=2.9`), `etcd` (`etcd3>=0.12`), `service-discovery` (kazoo+etcd3)
 - Dev deps: `nthlayer-learn` (local workspace, for shared-DB integration tests)
-- CLI subcommands — all fully implemented:
+- CLI subcommands — all fully implemented (11 total):
   - `collect` — Collect SLO metrics from Prometheus and store assessments; exit 0 (all healthy) or exit 2 (EXHAUSTED/CRITICAL breach)
   - `drift` — Detect SLO budget drift patterns; exit 0 (NONE/INFO), 1 (WARN), 2 (CRITICAL)
   - `verify` — Verify declared metrics exist in Prometheus; exit 0 (all verified), 1 (optional missing), 2 (critical missing)
@@ -21,6 +21,7 @@ Deterministic runtime infrastructure layer for the NthLayer ecosystem. Reads liv
   - `scorecard` — Score service reliability (0–100) sorted descending; table or JSON output; exit 0; args: `--store` (default: assessments.db), `--format` (table|json, default: table)
   - `check-deploy` — Evaluate deployment gate based on slo_state assessments; exit 0 (APPROVED), 1 (WARNING), 2 (BLOCKED)
   - `explain` — Build human-readable budget explanations from stored assessments; exit 0; args: `--store` (default: assessments.db), `--service` (optional), `--slo` (optional filter), `--format` (table|json|markdown, default: table)
+  - `verify-records` — Verify decision record chain integrity or incident completeness; exit 0 (verified), 1 (failed), 2 (missing required args); args: `--decision-store` (required), `--chain` (assessments|verdicts|evaluations), `--stream` (for --chain assessments), `--agent` (for --chain verdicts), `--incident-id` (for --chain evaluations), `--incident` (for full incident verification)
 - `ObserveConfig` dataclass: `prometheus_url="http://localhost:9090"`, `store_path="assessments.db"`
 <!-- END AUTO-MANAGED -->
 
@@ -35,7 +36,9 @@ src/nthlayer_observe/
     assessment.py       # Assessment dataclass, VALID_ASSESSMENT_TYPES, create/to_dict/from_dict
     store.py            # AssessmentStore ABC, AssessmentFilter, MemoryAssessmentStore
     sqlite_store.py     # SQLiteAssessmentStore — WAL mode, thread-local connections, shared-DB capable
-    cli.py              # main() — _cmd_collect(), _cmd_drift(), _cmd_verify(), _cmd_discover(), _cmd_dependencies(), _cmd_blast_radius(), _cmd_portfolio(), _cmd_scorecard(), _cmd_check_deploy(), _cmd_explain() all implemented; @main_with_error_handling()
+    cli.py              # main() — _cmd_collect(), _cmd_drift(), _cmd_verify(), _cmd_discover(), _cmd_dependencies(), _cmd_blast_radius(), _cmd_portfolio(), _cmd_scorecard(), _cmd_check_deploy(), _cmd_explain(), _cmd_verify_records() all implemented; @main_with_error_handling(); _cmd_verify_records() decorated with @main_with_error_handling(); _add_decision_store_args() adds --decision-store/--legacy-store to collect/drift/verify/dependencies/check-deploy; _write_decision_record() performs dual-write to SQLiteDecisionRecordStore when --decision-store set
+    decision_records.py # Bridge: converts legacy Assessment → content-addressed DecisionAssessment; exports build_decision_record, build_stream, generate_summaries, map_severity; lookup dicts for type/severity mapping; summaries truncated at 280/280/140 chars
+    incident.py         # Incident envelope creation; create_incident_from_breach(store, trigger_hash, stream) → Incident; id format: inc-{uuid12}; writes to SQLiteDecisionRecordStore
     explanation.py      # ExplanationEngine — explain_service(service, store, slo_filter) → list[BudgetExplanation]; deterministic, no LLM; imports BudgetExplanation from nthlayer_common.explanation
     config.py           # ObserveConfig dataclass (prometheus_url, store_path)
     api/                # (stub) Runtime HTTP API server
@@ -100,6 +103,10 @@ tests/
     test_gate_evaluator.py   # TestCheckDeploy (11: approved/warning/blocked/no-assessments/multi-slo/custom-policy-warning/custom-policy-blocking/low-tier-advisory/exhaustion-freeze/exhaustion-require-approval/slo-without-percent_consumed-ignored), TestCheckDeployCLI (check-deploy --help)
     test_gate_policies.py    # TestConditions (10), TestPolicyContext (2), TestConditionEvaluator (19: empty/simple/equality/inequality/AND/OR/NOT/parentheses/bool-var/missing-var/numeric/function-business_hours/weekday/freeze_period/invalid-fails-safe/evaluate_all-most-restrictive/evaluate_all-no-match/float/double-quotes/complex)
     test_explanation.py      # TestExplanationEngine (11: healthy/warning/critical/exhausted/slo_filter/no_assessments/multiple/actions/budget_math/causes_over_80pct/causes_sli_below_target/returns_BudgetExplanation_type)
+    test_decision_records.py     # TestMapSeverity (18: all slo_state statuses/drift severities/verification exit codes/gate decisions/dependency errors), TestBuildStream, TestGenerateSummaries, TestBuildDecisionRecord (hash integrity/chaining/incident_id)
+    test_cli_decision_records.py # TestWriteDecisionRecord (5: writes/skips-when-no-store/chains-multiple/independent-streams/gate-severity)
+    test_incident.py             # TestCreateIncidentFromBreach (3: creates-envelope/retrievable/id-format)
+    test_verify_cli.py           # TestVerifyCLI (7: chain-valid/chain-empty/incident-valid/incident-not-found/chain-evaluations/missing-key-exit-2/help), TestFullChainIntegration (1: assessment→incident→correlate-verdict→triage-verdict→evaluation→verify)
 ```
 <!-- END AUTO-MANAGED -->
 
@@ -125,7 +132,7 @@ uv pip install pip-audit && uv run pip-audit --progress-spinner off
 
 - **Deterministic only** — no LLM calls, no probabilistic logic; all assessments are rule-based from live metrics
 - **Stateful** — unlike `nthlayer` (pure stateless compiler), this component maintains assessment state in SQLite (`assessments.db`)
-- **Error handling** — CLI `main()` uses `@main_with_error_handling()` from `nthlayer_common.errors`; `collect` exits 2 on breach, 0 on healthy; `drift` exits 0 (NONE/INFO), 1 (WARN), 2 (CRITICAL); `verify` exits 0 (all verified), 1 (optional missing), 2 (critical missing); `blast-radius` exits 0 (low), 1 (medium), 2 (high/critical); `check-deploy` exits 0 (APPROVED), 1 (WARNING), 2 (BLOCKED)
+- **Error handling** — CLI `main()` uses `@main_with_error_handling()` from `nthlayer_common.errors`; `collect` exits 2 on breach, 0 on healthy; `drift` exits 0 (NONE/INFO), 1 (WARN), 2 (CRITICAL); `verify` exits 0 (all verified), 1 (optional missing), 2 (critical missing); `blast-radius` exits 0 (low), 1 (medium), 2 (high/critical); `check-deploy` exits 0 (APPROVED), 1 (WARNING), 2 (BLOCKED); `verify-records` exits 0 (verified), 1 (chain/incident failed), 2 (missing required chain key: --stream for assessments, --agent for verdicts, --incident-id for evaluations, or missing --chain/--incident entirely)
 - **Config** — `ObserveConfig` dataclass with sensible defaults; Prometheus URL and store path are the two primary runtime knobs
 - **Imports** — `nthlayer-common` is a local workspace dep (`../nthlayer-common`), `nthlayer-learn` is a dev-only dep (`../nthlayer-learn/lib/python`); both resolved via `[tool.uv.sources]`
 - **Tests** — assert on exit codes and structured output, never on raw text in captured stdout; stderr substring assertions only for `"not yet implemented"` (stub) and `"No SLO definitions found"` (collect empty-dir)
@@ -136,6 +143,7 @@ uv pip install pip-audit && uv run pip-audit --progress-spinner off
 - **Async dependency discovery** — `DependencyDiscovery.discover()` fans out upstream+downstream queries to all providers in parallel via `asyncio.gather`; provider errors are captured per-provider in `result.errors`, never raised; `_cmd_dependencies()` wraps with `asyncio.run()`
 - **Optional provider imports** — Kubernetes, Zookeeper, and etcd providers use lazy/guarded imports; missing optional package raises a clear error at call time, not at import time; `providers/__init__.py` silently sets provider classes to `None` on `ImportError`
 - **Dependency deduplication** — `DiscoveredDependency`: keeps highest confidence per source:target:type key; `ResolvedDependency`: merges providers list (set union) and takes max confidence
+- **Dual-write opt-in** — commands that write assessments (collect, drift, verify, dependencies, check-deploy) accept `--decision-store <path>` and `--legacy-store` (default on); when `--decision-store` is set, `_write_decision_record()` additionally writes a content-addressed record to `SQLiteDecisionRecordStore`; `--no-legacy-store` disables the legacy `assessments.db` write
 
 ## Data Model
 
@@ -234,4 +242,15 @@ uv pip install pip-audit && uv run pip-audit --progress-spinner off
 - **ConditionEvaluator** — evaluates DSL condition strings against a context dict; supports: AND/OR/NOT, parentheses, comparisons (==, !=, >=, <=, >, <), string literals (single or double quotes), boolean literals, function calls
 - **ConditionEvaluator.FUNCTIONS** — `business_hours()`, `weekday()`, `freeze_period(start, end)`, `peak_traffic()`; functions use `PolicyContext.now` when available, else `datetime.now()`
 - **evaluate_all(conditions)** — returns `(matched: bool, most_restrictive: dict | None)`; picks condition with highest `blocking` value among all matching `when` clauses; fails safe on invalid condition (returns False)
+
+## Decision Records
+
+- **decision_records.py** — bridge module; converts legacy `Assessment` → content-addressed `DecisionAssessment` (from `nthlayer_common.records.models`)
+- **build_stream(legacy)** — stream identifier: `"sli:{service}:{slo_name}"` for slo_state/drift; `"{type}:{service}"` for verification/gate/dependency
+- **map_severity(assessment_type, data)** — lookup-dict dispatch: slo_state uses `_SLO_STATUS_SEVERITY` (EXHAUSTED/CRITICAL→CRITICAL, WARNING→WARNING, HEALTHY→INFO, NO_DATA/ERROR→WARNING); drift uses `_DRIFT_SEVERITY`; verification uses exit_code (>=2→CRITICAL, >=1→WARNING, 0→INFO); gate uses `_GATE_SEVERITY` (blocked→CRITICAL, warning→WARNING, approved→INFO); dependency uses errors presence
+- **_TYPE_MAP** — slo_state→`THRESHOLD_BREACH`, drift→`DRIFT`, verification/gate/dependency→`CHANGE_EVENT`
+- **generate_summaries(legacy)** — template-based `Summaries(technical, plain, executive)`; truncated at 280/280/140 chars; covers all 5 assessment types
+- **build_decision_record(legacy, *, previous_hash, incident_id=None)** — builds placeholder record, computes `canonical_json` + SHA-256 hash, returns final `DecisionAssessment` with hash set; caller must supply correct `previous_hash` (chain tail for the stream, or `ZERO_HASH` for genesis)
+- **Chain management in CLI** — `_write_decision_record()` calls `store.get_chain("assessment", stream)` to find the current tail before each write; each stream maintains an independent hash chain
+- **incident.py** — incident envelope creation; `create_incident_from_breach(store, trigger_hash, stream)` → `Incident`; generates `incident_id = f"inc-{uuid4().hex[:12]}"`, writes to store, returns `Incident` with `status=IncidentStatus.OPEN`; caller uses `incident.id` to stamp downstream records
 <!-- END AUTO-MANAGED -->
